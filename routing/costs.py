@@ -1,38 +1,62 @@
-"""Función de coste g. Responsable: persona 2 (con datos de la persona 3).
+from core.contracts import Edge, EdgeKind, Context, Profile, IncidentKind, Graph
 
-Aquí se decide cuánto "cuesta" cada arista según el contexto y el perfil.
-Es la pieza que convierte un A* de libro en uno adaptado a la situación real.
-"""
-from core.contracts import Context, Edge, Profile
+PENALTY_TRANSFER = 8.0
+PENALTY_RAIN = 3.0
+DEFAULT_HEADWAY_MINUTES = 4.0
+PENALTY_HEAT = 1.5
+EXTREME_HEAT_C = 38.0
 
 
-def edge_cost(edge: Edge, context: Context, profile: Profile) -> float:
-    """Coste en minutos de recorrer una arista en las condiciones dadas.
+def line_delay(line_id: str, context: Context) -> float:
+    return sum(
+        incident.extra_minutes
+        for incident in context.incidents
+            if incident.kind == IncidentKind.LINE_DELAY and incident.line_id == line_id
+    )
 
-    Factores previstos (decidid los valores y justificadlos en la memoria):
+def is_station_blocked(station_id: str, context: Context, profile: Profile, graph: Graph | None = None) -> bool:
+    for incident in context.incidents:
+        if incident.kind == IncidentKind.STATION_CLOSED and incident.station_id == station_id:
+            return True
 
-    - Tiempo base: edge.minutes.
-    - Espera en transbordos: depende de context.headways de la línea destino.
-    - Retrasos: incidencias LINE_DELAY de context.incidents.
-    - Clima: context.weather puede penalizar los transbordos a pie o las
-      estaciones no subterráneas.
-    - Perfil: FEWEST_TRANSFERS encarece los transbordos; ACCESSIBLE impide
-      usar estaciones sin ascensor.
-
-    Una arista que no se puede usar (estación cerrada, o sin ascensor en el
-    perfil accesible) devuelve float("inf").
-
-    IMPORTANTE: el resultado nunca puede ser menor que edge.minutes. Si lo
-    fuera, la heurística dejaría de ser admisible y A* ya no garantizaría la
-    ruta óptima.
-    """
-    raise NotImplementedError("routing.costs.edge_cost() está pendiente (persona 2)")
-
+    if profile == Profile.ACCESSIBLE and graph is not None:
+        station_info = graph.stations.get(station_id)
+        if station_info is not None and not station_info.has_elevator:
+            return True
+    return False
 
 def initial_wait(line_id: str, context: Context) -> float:
-    """Minutos de espera estimados al entrar en la primera estación.
+    return (context.headways.get(line_id, DEFAULT_HEADWAY_MINUTES) / 2.0) + line_delay(line_id, context)
 
-    Se suma una sola vez, al principio del viaje, según la frecuencia de la
-    línea en context.headways.
-    """
-    raise NotImplementedError("routing.costs.initial_wait() está pendiente (persona 2)")
+
+def real_edge_minutes(edge: Edge, context: Context) -> float:
+    minutes = edge.minutes
+    if edge.kind == EdgeKind.TRANSFER:
+        _, target_line = edge.target
+        headway = context.headways.get(target_line, DEFAULT_HEADWAY_MINUTES)
+        minutes += (headway / 2.0) + line_delay(target_line, context)
+    return minutes
+
+
+def edge_cost(edge: Edge, context: Context, profile: Profile, graph: Graph | None = None) -> float:
+    source_station, source_line = edge.source
+    target_station, target_line = edge.target
+
+    if is_station_blocked(source_station, context, profile, graph) or is_station_blocked(target_station, context, profile, graph):
+        return float("inf")
+
+    cost = real_edge_minutes(edge, context)
+
+    if edge.kind == EdgeKind.TRANSFER:
+        if profile == Profile.FEWEST_TRANSFERS:
+            cost += PENALTY_TRANSFER
+        if context.weather is not None:
+            station_info = graph.stations.get(target_station) if graph is not None else None
+            is_underground = station_info.underground if station_info is not None else False
+            if not is_underground:
+                if context.weather.is_raining:
+                    cost += PENALTY_RAIN
+                if context.weather.temperature_c >= EXTREME_HEAT_C:
+                    cost += PENALTY_HEAT
+
+    return max(edge.minutes, cost)
